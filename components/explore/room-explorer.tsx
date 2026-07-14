@@ -16,21 +16,44 @@ import {
   Plus,
   TriangleAlert,
 } from "lucide-react";
-import { POINT_CLOUD_FRAGMENT_GLSL, POINT_CLOUD_VERTEX_GLSL } from "./point-cloud-shader";
+import { Progress, ProgressValue } from "@/components/ui/progress";
+import { WordRotate } from "@/components/ui/word-rotate";
+import {
+  POINT_CLOUD_FRAGMENT_GLSL,
+  POINT_CLOUD_VERTEX_GLSL,
+} from "./point-cloud-shader";
 
 interface RoomExplorerProps {
   modelUrl: string;
   backHref: string;
-  /** Rotation around the X axis applied on load, in degrees. See Room.tiltDegrees. */
+  /** Rotation around the X axis applied on load, in degrees. See House.tiltDegrees. */
   tiltDegrees?: number;
-  /** Rotation around the Z axis applied on load, in degrees. See Room.rollDegrees. */
+  /** Rotation around the Z axis applied on load, in degrees. See House.rollDegrees. */
   rollDegrees?: number;
+  /** Camera starting position within the (corrected/recentered) model. See Room.spawnPosition. */
+  spawnPosition?: { x: number; y: number; z: number };
+  /** Camera starting yaw in degrees. See Room.spawnYaw. */
+  spawnYaw?: number;
+  /** Camera starting pitch in degrees. See Room.spawnPitch. */
+  spawnPitch?: number;
+  /** Size of modelUrl's file in bytes. See House.modelSizeBytes. */
+  modelSizeBytes?: number;
 }
 
 type Status =
-  | { phase: "loading"; progress: number }
+  | { phase: "downloading"; progress: number }
+  | { phase: "processing"; progress: number }
   | { phase: "error"; message: string }
   | { phase: "ready" };
+
+const LOADING_MESSAGES = [
+  "Waking up the walls…",
+  "Convincing gravity to cooperate…",
+  "Untangling the floor plan…",
+  "Sweeping up stray pixels…",
+  "Measuring twice, rendering once…",
+  "Bribing the Wi-Fi…",
+];
 
 // Virtual "keys" driven by on-screen touch buttons, tracked in the same pressed-keys set
 // as real keyboard codes so the movement loop doesn't need to know the input source.
@@ -70,15 +93,24 @@ function TouchButton({
   );
 }
 
+const ORIGIN_SPAWN = { x: 0, y: 0, z: 0 };
+
 export function RoomExplorer({
   modelUrl,
   backHref,
   tiltDegrees = 0,
   rollDegrees = 0,
+  spawnPosition = ORIGIN_SPAWN,
+  spawnYaw = 0,
+  spawnPitch = 0,
+  modelSizeBytes,
 }: RoomExplorerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pressedRef = useRef<Set<string>>(new Set());
-  const [status, setStatus] = useState<Status>({ phase: "loading", progress: 0 });
+  const [status, setStatus] = useState<Status>({
+    phase: "downloading",
+    progress: 0,
+  });
   const [locked, setLocked] = useState(false);
   const [pointCount, setPointCount] = useState<number | null>(null);
   const [speed, setSpeed] = useState(1);
@@ -86,9 +118,22 @@ export function RoomExplorer({
   // This component is only ever mounted client-side (see room-explorer-client.tsx), so it's
   // safe to compute this eagerly instead of via an effect - there's no SSR output to mismatch.
   const [isTouchDevice] = useState(
-    () => navigator.maxTouchPoints > 0 || window.matchMedia("(pointer: coarse)").matches
+    () =>
+      navigator.maxTouchPoints > 0 ||
+      window.matchMedia("(pointer: coarse)").matches,
   );
   const speedTargetRef = useRef<{ set: (v: number) => void } | null>(null);
+  // Set once the scene/camera exist (see the model-loading effect below); called by the
+  // spawn-point effect further down so switching which room's spawn point is active just moves
+  // the camera - it never touches the PlayCanvas app or re-fetches the (possibly huge) model.
+  const gotoSpawnRef = useRef<
+    | ((
+        pos: { x: number; y: number; z: number },
+        yaw: number,
+        pitch: number,
+      ) => void)
+    | null
+  >(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -178,15 +223,52 @@ export function RoomExplorer({
     });
     app.root.addChild(camera);
 
+    // Imperative repositioning, independent of asset loading - the spawn-point effect below
+    // calls this directly so switching rooms is instant instead of tearing down/reloading the
+    // scene. Also used here for the initial spawn, before the model has even started loading
+    // (harmless - the canvas is covered by the loading overlay until status is "ready").
+    const gotoSpawn = (
+      pos: { x: number; y: number; z: number },
+      yaw: number,
+      pitch: number,
+    ) => {
+      position.set(pos.x, pos.y, pos.z);
+      angles.set(pitch, yaw, 0);
+      targetAngles.set(pitch, yaw, 0);
+      camera.setPosition(position);
+      camera.setEulerAngles(angles.x, angles.y, 0);
+    };
+    gotoSpawnRef.current = gotoSpawn;
+    gotoSpawn(spawnPosition, spawnYaw, spawnPitch);
+
     // --- keyboard ---
     const trackedCodes = new Set([
-      "KeyW", "KeyA", "KeyS", "KeyD",
-      "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
-      "Space", "ShiftLeft", "ShiftRight", "ControlLeft", "ControlRight", "KeyC", "KeyE", "KeyQ",
+      "KeyW",
+      "KeyA",
+      "KeyS",
+      "KeyD",
+      "ArrowUp",
+      "ArrowDown",
+      "ArrowLeft",
+      "ArrowRight",
+      "Space",
+      "ShiftLeft",
+      "ShiftRight",
+      "ControlLeft",
+      "ControlRight",
+      "KeyC",
+      "KeyE",
+      "KeyQ",
     ]);
     const onKeyDown = (e: KeyboardEvent) => {
       if (trackedCodes.has(e.code)) e.preventDefault();
       pressed.add(e.code);
+      // Dev helper: print the current pose in a form ready to paste as a Room's spawn point.
+      if (e.code === "KeyP") {
+        console.log(
+          `spawnPosition: { x: ${position.x.toFixed(2)}, y: ${position.y.toFixed(2)}, z: ${position.z.toFixed(2)} }, spawnYaw: ${angles.y.toFixed(1)}, spawnPitch: ${angles.x.toFixed(1)}`,
+        );
+      }
     };
     const onKeyUp = (e: KeyboardEvent) => pressed.delete(e.code);
     window.addEventListener("keydown", onKeyDown);
@@ -199,7 +281,10 @@ export function RoomExplorer({
     const applyLook = (dx: number, dy: number) => {
       targetAngles.x -= dy * rotateSensitivity;
       targetAngles.y -= dx * rotateSensitivity;
-      targetAngles.x = Math.max(-pitchLimit, Math.min(pitchLimit, targetAngles.x));
+      targetAngles.x = Math.max(
+        -pitchLimit,
+        Math.min(pitchLimit, targetAngles.x),
+      );
     };
 
     const onMouseMove = (e: MouseEvent) => {
@@ -208,7 +293,8 @@ export function RoomExplorer({
     };
     document.addEventListener("mousemove", onMouseMove);
 
-    const onPointerLockChange = () => setLocked(document.pointerLockElement === canvas);
+    const onPointerLockChange = () =>
+      setLocked(document.pointerLockElement === canvas);
     document.addEventListener("pointerlockchange", onPointerLockChange);
 
     const onCanvasPointerDown = (e: PointerEvent) => {
@@ -278,29 +364,58 @@ export function RoomExplorer({
 
       const shift = pressed.has("ShiftLeft") || pressed.has("ShiftRight");
       const ctrl = pressed.has("ControlLeft") || pressed.has("ControlRight");
-      const speed = shift ? moveState.baseSpeed * moveState.fastMultiplier
-        : ctrl ? moveState.baseSpeed * moveState.slowMultiplier
-        : moveState.baseSpeed;
+      const speed = shift
+        ? moveState.baseSpeed * moveState.fastMultiplier
+        : ctrl
+          ? moveState.baseSpeed * moveState.slowMultiplier
+          : moveState.baseSpeed;
       const d = speed * dt;
 
       const strafe =
-        (pressed.has("KeyD") || pressed.has("ArrowRight") || pressed.has(TOUCH_RIGHT) ? 1 : 0) -
-        (pressed.has("KeyA") || pressed.has("ArrowLeft") || pressed.has(TOUCH_LEFT) ? 1 : 0);
+        (pressed.has("KeyD") ||
+        pressed.has("ArrowRight") ||
+        pressed.has(TOUCH_RIGHT)
+          ? 1
+          : 0) -
+        (pressed.has("KeyA") ||
+        pressed.has("ArrowLeft") ||
+        pressed.has(TOUCH_LEFT)
+          ? 1
+          : 0);
       const vertical =
-        (pressed.has("KeyE") || pressed.has("Space") || pressed.has(TOUCH_UP) ? 1 : 0) -
-        (pressed.has("KeyQ") || pressed.has("KeyC") || pressed.has(TOUCH_DOWN) ? 1 : 0);
+        (pressed.has("KeyE") || pressed.has("Space") || pressed.has(TOUCH_UP)
+          ? 1
+          : 0) -
+        (pressed.has("KeyQ") || pressed.has("KeyC") || pressed.has(TOUCH_DOWN)
+          ? 1
+          : 0);
       const move =
-        (pressed.has("KeyW") || pressed.has("ArrowUp") || pressed.has(TOUCH_FORWARD) ? 1 : 0) -
-        (pressed.has("KeyS") || pressed.has("ArrowDown") || pressed.has(TOUCH_BACK) ? 1 : 0);
+        (pressed.has("KeyW") ||
+        pressed.has("ArrowUp") ||
+        pressed.has(TOUCH_FORWARD)
+          ? 1
+          : 0) -
+        (pressed.has("KeyS") ||
+        pressed.has("ArrowDown") ||
+        pressed.has(TOUCH_BACK)
+          ? 1
+          : 0);
 
       if (strafe || vertical || move) {
         setCameraBasis();
-        const len = Math.sqrt(strafe * strafe + vertical * vertical + move * move) || 1;
+        const len =
+          Math.sqrt(strafe * strafe + vertical * vertical + move * move) || 1;
         const scale = d / len;
         moveOffset.set(
-          right.x * strafe * scale + up.x * vertical * scale + forward.x * move * scale,
-          right.y * strafe * scale + up.y * vertical * scale + forward.y * move * scale,
-          right.z * strafe * scale + up.z * vertical * scale + forward.z * move * scale
+          right.x * strafe * scale +
+            up.x * vertical * scale +
+            forward.x * move * scale,
+          right.y * strafe * scale +
+            up.y * vertical * scale +
+            forward.y * move * scale,
+          right.z * strafe * scale +
+            up.z * vertical * scale +
+            forward.z * move * scale,
         );
         moveWithCollision(moveOffset);
       }
@@ -319,18 +434,86 @@ export function RoomExplorer({
     // file is a plain colored point cloud (just x/y/z/red/green/blue, no splat scale/rotation/SH),
     // we pull the properties out here and build our own point-cloud mesh instead of using
     // GSplatComponent.
-    const asset = new pc.Asset(modelUrl, "gsplat", { url: modelUrl }, { reorder: false });
     let handled = false;
+    let loadedAsset: pc.Asset | null = null;
 
-    asset.on("progress", (received: number, total: number) => {
-      if (!destroyed && !handled && total > 0) {
-        setStatus({ phase: "loading", progress: Math.min(1, received / total) });
+    const MODEL_CACHE_NAME = "3d-estate-models-v1";
+
+    // Firefox's HTTP disk cache silently refuses to store any single response over ~50MB
+    // (browser.cache.disk.max_entry_size) - a splat/point-cloud file this size would never be
+    // cached there no matter what Cache-Control headers the server sends, so every visit would
+    // re-download the whole thing. The Cache Storage API (the mechanism service workers use for
+    // offline asset caching) is a separate store with a much larger, disk-space-based quota, so
+    // it's used explicitly here instead of relying on the browser's implicit HTTP cache. A cheap
+    // HEAD request compares ETags so a re-uploaded model (see scripts/upload-models.mjs's
+    // allowOverwrite) doesn't get stuck serving a stale cached copy forever.
+    const fetchModelResponse = async (url: string): Promise<Response> => {
+      if (typeof caches === "undefined") {
+        return fetch(url);
       }
-    });
-
-    asset.on("load:data", (data: pc.GSplatData) => {
-      if (destroyed || handled) return;
       try {
+        const cache = await caches.open(MODEL_CACHE_NAME);
+        const [cached, head] = await Promise.all([
+          cache.match(url),
+          fetch(url, { method: "HEAD" }).catch(() => null),
+        ]);
+        const freshEtag = head?.headers.get("etag");
+        if (
+          cached &&
+          (!freshEtag || freshEtag === cached.headers.get("etag"))
+        ) {
+          return cached;
+        }
+        const response = await fetch(url);
+        if (response.ok) {
+          cache.put(url, response.clone()).catch(() => {});
+        }
+        return response;
+      } catch {
+        return fetch(url);
+      }
+    };
+
+    const loadModel = async () => {
+      let contents: Response | undefined;
+      try {
+        contents = await fetchModelResponse(modelUrl);
+      } catch {
+        // fall back to letting PlayCanvas's own fetch handle (and report) the error below
+      }
+      if (destroyed) return;
+
+      // PlayCanvas's .d.ts types file.contents as ArrayBuffer, but the actual gsplat/PLY runtime
+      // (PlyParser.load) reads `.body`/`.headers` directly off it - it genuinely expects a
+      // Response, a real mismatch between the published types and the engine's own source.
+      const file = contents
+        ? { url: modelUrl, contents: contents as unknown as ArrayBuffer }
+        : { url: modelUrl };
+      const asset = new pc.Asset(modelUrl, "gsplat", file, { reorder: false });
+      loadedAsset = asset;
+
+      asset.on("progress", (received: number, total: number) => {
+        // Vercel Blob serves large files dynamically Brotli-compressed with no Content-Length
+        // header, so `total` from the engine is always 0 for them - modelSizeBytes (recorded at
+        // upload time, see scripts/upload-models.mjs) is the only reliable size available.
+        const effectiveTotal = modelSizeBytes ?? total;
+        if (!destroyed && !handled && effectiveTotal > 0) {
+          setStatus({
+            phase: "downloading",
+            progress: Math.min(1, received / effectiveTotal),
+          });
+        }
+      });
+
+      // The heavy per-point work below (sorting for percentiles, building the collision grid,
+      // building the render mesh) is synchronous and can take a noticeable moment for a
+      // multi-million-point splat - yielding to the browser's render loop between the major steps
+      // (rather than doing it all in one blocking call) lets the "processing" progress below
+      // actually paint instead of jumping straight from download to ready.
+      const yieldToRender = () =>
+        new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+      const processModelData = async (data: pc.GSplatData) => {
         const count = data.numSplats;
         const xs = data.getProp("x");
         const ys = data.getProp("y");
@@ -338,6 +521,10 @@ export function RoomExplorer({
         if (!xs || !ys || !zs) {
           throw new Error("PLY file is missing x/y/z vertex properties");
         }
+
+        setStatus({ phase: "processing", progress: 0.05 });
+        await yieldToRender();
+        if (destroyed) return;
 
         // Both point clouds and gaussian splats size up the scene (and thus the initial camera
         // move speed) the same way, so switching between the two never changes how movement
@@ -373,20 +560,30 @@ export function RoomExplorer({
           const halfX = ((rx.hi - rx.lo) / 2) * 1.2;
           const halfY = ((ry.hi - ry.lo) / 2) * 1.2;
           const halfZ = ((rz.hi - rz.lo) / 2) * 1.2;
-          const radius = Math.sqrt(halfX * halfX + halfY * halfY + halfZ * halfZ);
+          const radius = Math.sqrt(
+            halfX * halfX + halfY * halfY + halfZ * halfZ,
+          );
           return { centerX, centerY, centerZ, radius };
         };
 
-        // Room.tiltDegrees (X) corrects for scanning/training tools disagreeing on which axis is
-        // "up"; Room.rollDegrees (Z) corrects any residual bank left once tilt is right (a scan
+        // House.tiltDegrees (X) corrects for scanning/training tools disagreeing on which axis is
+        // "up"; House.rollDegrees (Z) corrects any residual bank left once tilt is right (a scan
         // that wasn't perfectly level makes walls appear to bank as the camera pans). Both are
         // baked into one correction so point clouds and gaussian splats are leveled identically.
-        const correctionRotation = new pc.Quat().setFromEulerAngles(tiltDegrees, 0, rollDegrees);
+        const correctionRotation = new pc.Quat().setFromEulerAngles(
+          tiltDegrees,
+          0,
+          rollDegrees,
+        );
 
         // Wall/floor/ceiling collision grid, built from the same world-space (corrected +
         // recentered) points the camera moves through - identical for point clouds and gaussian
         // splats, so bumping into geometry feels the same regardless of which one loaded.
-        const buildOccupancyGrid = (centerX: number, centerY: number, centerZ: number) => {
+        const buildOccupancyGrid = (
+          centerX: number,
+          centerY: number,
+          centerZ: number,
+        ) => {
           const grid = new Set<number>();
           const scratch = new pc.Vec3();
           for (let i = 0; i < count; i++) {
@@ -401,27 +598,42 @@ export function RoomExplorer({
         // spherical harmonics) - that needs the engine's native GSplatComponent renderer. A
         // plain scanner point cloud (just x/y/z/red/green/blue, like the Polycam file) has none
         // of that, so it's rendered as flat dots via our own mesh/shader instead.
-        const isGaussianSplat = !!(data.getProp("scale_0") && data.getProp("rot_0"));
+        const isGaussianSplat = !!(
+          data.getProp("scale_0") && data.getProp("rot_0")
+        );
 
         if (isGaussianSplat) {
-          const { centerX: meanX, centerY: meanY, centerZ: meanZ, radius } = computeSceneBounds();
+          const {
+            centerX: meanX,
+            centerY: meanY,
+            centerZ: meanZ,
+            radius,
+          } = computeSceneBounds();
+          setStatus({ phase: "processing", progress: 0.5 });
+          await yieldToRender();
+          if (destroyed) return;
 
           // Since we're not rewriting a million+ splats worth of data, the correction and the
           // recentering live entirely in the container entity's transform.
-          const rotatedCenter = correctionRotation.transformVector(new pc.Vec3(meanX, meanY, meanZ), new pc.Vec3());
+          const rotatedCenter = correctionRotation.transformVector(
+            new pc.Vec3(meanX, meanY, meanZ),
+            new pc.Vec3(),
+          );
 
           const splatEntity = new pc.Entity("gaussian-splat");
           splatEntity.setRotation(correctionRotation);
-          splatEntity.setPosition(-rotatedCenter.x, -rotatedCenter.y, -rotatedCenter.z);
+          splatEntity.setPosition(
+            -rotatedCenter.x,
+            -rotatedCenter.y,
+            -rotatedCenter.z,
+          );
           splatEntity.addComponent("gsplat", { asset });
           app.root.addChild(splatEntity);
 
-          position.set(0, 0, 0);
-          angles.set(0, 0, 0);
-          targetAngles.set(0, 0, 0);
-          camera.setPosition(0, 0, 0);
-          camera.setEulerAngles(0, 0, 0);
           occupancyGrid = buildOccupancyGrid(meanX, meanY, meanZ);
+          setStatus({ phase: "processing", progress: 0.9 });
+          await yieldToRender();
+          if (destroyed) return;
 
           speedTargetRef.current?.set(Math.max(0.6, radius * 0.35));
           setPointCount(count);
@@ -456,6 +668,9 @@ export function RoomExplorer({
         ensureProp("opacity", -10);
 
         const { centerX, centerY, centerZ, radius } = computeSceneBounds();
+        setStatus({ phase: "processing", progress: 0.4 });
+        await yieldToRender();
+        if (destroyed) return;
 
         // Correction applied around the scene center so the origin sits in open space in the
         // room; a scratch vector avoids allocating one per point across potentially millions.
@@ -478,6 +693,9 @@ export function RoomExplorer({
           grid.add(voxelKey(scratch.x, scratch.y, scratch.z));
         }
         occupancyGrid = grid;
+        setStatus({ phase: "processing", progress: 0.9 });
+        await yieldToRender();
+        if (destroyed) return;
 
         const mesh = new pc.Mesh(app.graphicsDevice);
         mesh.setPositions(positions);
@@ -511,39 +729,48 @@ export function RoomExplorer({
 
         const meshInstance = new pc.MeshInstance(mesh, material);
         const pointCloudEntity = new pc.Entity("point-cloud");
-        pointCloudEntity.addComponent("render", { meshInstances: [meshInstance] });
+        pointCloudEntity.addComponent("render", {
+          meshInstances: [meshInstance],
+        });
         app.root.addChild(pointCloudEntity);
-
-        position.set(0, 0, 0);
-        angles.set(0, 0, 0);
-        targetAngles.set(0, 0, 0);
-        camera.setPosition(0, 0, 0);
-        camera.setEulerAngles(0, 0, 0);
 
         speedTargetRef.current?.set(Math.max(0.6, radius * 0.35));
         setPointCount(count);
         handled = true;
         setStatus({ phase: "ready" });
-      } catch (err) {
-        handled = true;
+      };
+
+      asset.on("load:data", (data: pc.GSplatData) => {
+        if (destroyed || handled) return;
+        processModelData(data).catch((err) => {
+          handled = true;
+          setStatus({
+            phase: "error",
+            message:
+              err instanceof Error
+                ? err.message
+                : "Failed to load the 3D model",
+          });
+        });
+      });
+
+      asset.on("error", (err: string) => {
+        if (destroyed || handled) return;
         setStatus({
           phase: "error",
-          message: err instanceof Error ? err.message : "Failed to load the 3D model",
+          message: err || "Failed to load the 3D model",
         });
-      }
-    });
+      });
 
-    asset.on("error", (err: string) => {
-      if (destroyed || handled) return;
-      setStatus({ phase: "error", message: err || "Failed to load the 3D model" });
-    });
+      app.assets.add(asset);
+      app.assets.load(asset);
+    };
 
-    app.assets.add(asset);
-    app.assets.load(asset);
+    loadModel();
 
     return () => {
       destroyed = true;
-      app.assets.remove(asset);
+      if (loadedAsset) app.assets.remove(loadedAsset);
       window.removeEventListener("resize", onResize);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
@@ -558,9 +785,25 @@ export function RoomExplorer({
       if (document.pointerLockElement === canvas) {
         document.exitPointerLock();
       }
+      gotoSpawnRef.current = null;
       app.destroy();
     };
-  }, [modelUrl, retryKey, tiltDegrees, rollDegrees]);
+    // spawnPosition/spawnYaw/spawnPitch are intentionally not deps: this effect owns loading the
+    // (potentially huge) model, which shouldn't happen again just because the active room's spawn
+    // point changed. The initial gotoSpawn() call above always reads their current values; the
+    // effect below handles repositioning after that without reloading anything.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelUrl, retryKey, tiltDegrees, rollDegrees, modelSizeBytes]);
+
+  // Runs whenever the active room's spawn point changes, independent of the model-loading effect
+  // above - switching rooms within the same house is instant, no re-fetch of the model.
+  useEffect(() => {
+    gotoSpawnRef.current?.(
+      { x: spawnPosition.x, y: spawnPosition.y, z: spawnPosition.z },
+      spawnYaw,
+      spawnPitch,
+    );
+  }, [spawnPosition.x, spawnPosition.y, spawnPosition.z, spawnYaw, spawnPitch]);
 
   const press = (code: string) => pressedRef.current.add(code);
   const release = (code: string) => pressedRef.current.delete(code);
@@ -576,18 +819,28 @@ export function RoomExplorer({
 
   return (
     <div className="relative h-dvh w-full overflow-hidden bg-black">
-      <canvas ref={canvasRef} className="h-full w-full touch-none outline-none" />
+      <canvas
+        ref={canvasRef}
+        className="h-full w-full touch-none outline-none"
+      />
 
-      {status.phase === "loading" && (
+      {(status.phase === "downloading" || status.phase === "processing") && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-black/80 text-white">
           <Loader2 className="size-8 animate-spin" />
-          <p className="text-sm text-white/80">Loading room scan…</p>
-          <div className="h-1.5 w-56 overflow-hidden rounded-full bg-white/15">
-            <div
-              className="h-full bg-white transition-[width]"
-              style={{ width: `${Math.round(status.progress * 100)}%` }}
-            />
-          </div>
+          <WordRotate
+            words={LOADING_MESSAGES}
+            duration={1800}
+            className="text-2xl font-medium text-white/80"
+          />
+          {/* This overlay is always dark regardless of app theme, so the default bg-primary
+              indicator (near-black in light mode) would be invisible here - overridden via the
+              data-slot attributes the primitives already expose rather than the theme tokens. */}
+          <Progress
+            value={Math.round(status.progress * 100)}
+            className="w-80 flex-col items-center gap-2 **:data-[slot=progress-track]:h-3 **:data-[slot=progress-track]:bg-white/15 **:data-[slot=progress-indicator]:bg-white"
+          >
+            <ProgressValue className="text-sm text-white/60" />
+          </Progress>
         </div>
       )}
 
@@ -599,7 +852,7 @@ export function RoomExplorer({
             <button
               type="button"
               onClick={() => {
-                setStatus({ phase: "loading", progress: 0 });
+                setStatus({ phase: "downloading", progress: 0 });
                 setRetryKey((k) => k + 1);
               }}
               className="rounded-lg bg-white px-4 py-2 text-sm font-medium text-black"
@@ -620,10 +873,11 @@ export function RoomExplorer({
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-5 bg-black/60 px-6 text-center text-white">
           <MousePointerClick className="size-8" />
           <div className="space-y-1">
-            <p className="text-lg font-medium">Explore the room</p>
+            <p className="text-lg font-medium">Explore the house</p>
             <p className="max-w-sm text-sm text-white/70">
-              WASD to move · mouse to look · Q/E (or Space) for down/up · Shift faster · Ctrl
-              slower · scroll to change speed · Esc to release the cursor
+              WASD to move · mouse to look · Q/E (or Space) for down/up · Shift
+              faster · Ctrl slower · scroll to change speed · Esc to release the
+              cursor
             </p>
           </div>
           <div className="flex gap-2">
@@ -639,11 +893,13 @@ export function RoomExplorer({
               className="flex items-center gap-1.5 rounded-lg border border-white/30 px-4 py-2.5 text-sm font-medium text-white"
             >
               <ArrowLeft className="size-4" />
-              Back to room
+              Back to house
             </Link>
           </div>
           {pointCount !== null && (
-            <p className="text-xs text-white/40">{pointCount.toLocaleString()} points</p>
+            <p className="text-xs text-white/40">
+              {pointCount.toLocaleString()} points
+            </p>
           )}
         </div>
       )}
@@ -652,7 +908,8 @@ export function RoomExplorer({
         <>
           <div className="pointer-events-none absolute left-1/2 top-1/2 size-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/80" />
           <div className="pointer-events-none absolute bottom-3 left-3 rounded-md bg-black/40 px-3 py-1.5 text-xs text-white/70">
-            Esc to release the cursor · scroll to change speed ({speed.toFixed(1)}x)
+            Esc to release the cursor · scroll to change speed (
+            {speed.toFixed(1)}x)
           </div>
         </>
       )}
@@ -702,7 +959,11 @@ export function RoomExplorer({
             </div>
           </div>
           <div className="absolute bottom-6 right-4 flex flex-col items-center gap-1.5">
-            <TouchButton label="Move up" onPress={() => press(TOUCH_UP)} onRelease={() => release(TOUCH_UP)}>
+            <TouchButton
+              label="Move up"
+              onPress={() => press(TOUCH_UP)}
+              onRelease={() => release(TOUCH_UP)}
+            >
               <ChevronUp className="size-5" />
             </TouchButton>
             <TouchButton
@@ -714,10 +975,18 @@ export function RoomExplorer({
             </TouchButton>
           </div>
           <div className="absolute right-4 top-4 flex gap-1.5">
-            <TouchButton label="Slower" onPress={() => nudgeSpeed(0.75)} onRelease={() => {}}>
+            <TouchButton
+              label="Slower"
+              onPress={() => nudgeSpeed(0.75)}
+              onRelease={() => {}}
+            >
               <Minus className="size-5" />
             </TouchButton>
-            <TouchButton label="Faster" onPress={() => nudgeSpeed(1.25)} onRelease={() => {}}>
+            <TouchButton
+              label="Faster"
+              onPress={() => nudgeSpeed(1.25)}
+              onRelease={() => {}}
+            >
               <Plus className="size-5" />
             </TouchButton>
           </div>

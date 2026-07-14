@@ -10,7 +10,7 @@ export default function Home() {
       <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-10">
         <h1 className="text-2xl font-semibold tracking-tight">Houses</h1>
         <p className="mt-1 text-muted-foreground">
-          Browse listed properties and explore scanned rooms in 3D.
+          Browse listed properties and explore their 3D house scans.
         </p>
 
         <div className="mt-8 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
@@ -29,7 +29,9 @@ export default function Home() {
                 {house.address}
               </p>
               <p className="mt-3 text-sm text-muted-foreground">
-                {house.rooms.length} room{house.rooms.length === 1 ? "" : "s"} scanned
+                {house.rooms.length > 0
+                  ? `${house.rooms.length} room${house.rooms.length === 1 ? "" : "s"} to explore`
+                  : "3D house scan"}
               </p>
             </Link>
           ))}

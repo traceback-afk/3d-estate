@@ -1,7 +1,8 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, Box, MapPin } from "lucide-react";
+import { ArrowLeft, Box, MapPin, Move3d } from "lucide-react";
 import { SiteHeader } from "@/components/site-header";
+import { buttonVariants } from "@/components/ui/button";
 import { getHouse } from "@/lib/estate-data";
 
 export default async function HousePage({
@@ -32,23 +33,43 @@ export default async function HousePage({
         </p>
         <p className="mt-3 max-w-2xl text-muted-foreground">{house.description}</p>
 
-        <h2 className="mt-10 text-lg font-medium">Rooms</h2>
-        <div className="mt-4 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-          {house.rooms.map((room) => (
-            <Link
-              key={room.id}
-              href={`/houses/${house.id}/rooms/${room.id}`}
-              className="group rounded-xl border border-border bg-card p-5 transition-colors hover:border-foreground/30"
-            >
-              <div className="flex size-10 items-center justify-center rounded-lg bg-muted">
-                <Box className="size-5" />
-              </div>
-              <h3 className="mt-4 font-medium">{room.name}</h3>
-              <p className="mt-1 text-sm text-muted-foreground">{room.description}</p>
-              <span className="mt-3 inline-block text-sm font-medium">Explore in 3D →</span>
-            </Link>
-          ))}
+        <div className="mt-8 flex flex-col items-start gap-4 rounded-xl border border-border bg-card p-6 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="font-medium">Walk through this house in 3D</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Move around the 3D house scan like a first-person game.
+            </p>
+          </div>
+          <Link
+            href={`/houses/${house.id}/explore`}
+            className={buttonVariants({ size: "lg", className: "gap-2" })}
+          >
+            <Move3d className="size-4" />
+            Explore in 3D
+          </Link>
         </div>
+
+        {house.rooms.length > 0 && (
+          <>
+            <h2 className="mt-10 text-lg font-medium">Rooms</h2>
+            <div className="mt-4 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+              {house.rooms.map((room) => (
+                <Link
+                  key={room.id}
+                  href={`/houses/${house.id}/explore/${room.id}`}
+                  className="group rounded-xl border border-border bg-card p-5 transition-colors hover:border-foreground/30"
+                >
+                  <div className="flex size-10 items-center justify-center rounded-lg bg-muted">
+                    <Box className="size-5" />
+                  </div>
+                  <h3 className="mt-4 font-medium">{room.name}</h3>
+                  <p className="mt-1 text-sm text-muted-foreground">{room.description}</p>
+                  <span className="mt-3 inline-block text-sm font-medium">Jump to this spot →</span>
+                </Link>
+              ))}
+            </div>
+          </>
+        )}
       </main>
     </div>
   );

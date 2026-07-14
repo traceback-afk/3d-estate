@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "3D Estate",
-  description: "Browse houses and rooms, then explore scanned rooms in 3D.",
+  description: "Browse houses and explore their 3D house scans.",
 };
 
 export default function RootLayout({
