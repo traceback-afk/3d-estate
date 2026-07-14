@@ -1,17 +1,31 @@
 import Link from "next/link";
 import { DoorOpen, MapPin } from "lucide-react";
 import { SiteHeader } from "@/components/site-header";
-import { houses } from "@/lib/estate-data";
+import { getBaseUrl } from "@/lib/base-url";
+import type { House } from "@/types/estate";
 
-export default function Home() {
+export default async function Home() {
+  const res = await fetch(`${await getBaseUrl()}/api/houses`, { cache: "no-store" });
+  const houses: House[] = await res.json();
+
   return (
     <div className="flex min-h-full flex-1 flex-col bg-zinc-50 dark:bg-black">
       <SiteHeader />
       <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-10">
-        <h1 className="text-2xl font-semibold tracking-tight">Houses</h1>
-        <p className="mt-1 text-muted-foreground">
-          Browse listed properties and explore their 3D house scans.
-        </p>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">Houses</h1>
+            <p className="mt-1 text-muted-foreground">
+              Browse listed properties and explore their 3D house scans.
+            </p>
+          </div>
+          <Link
+            href="/admin"
+            className="shrink-0 rounded-lg border border-border px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground"
+          >
+            Manage listings
+          </Link>
+        </div>
 
         <div className="mt-8 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {houses.map((house) => (

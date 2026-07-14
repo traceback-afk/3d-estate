@@ -25,6 +25,14 @@ import {
 
 interface RoomExplorerProps {
   modelUrl: string;
+  /**
+   * "ply" gets the full custom pipeline: percentile-based outlier-robust bounds, a wall/floor/
+   * ceiling collision grid, and a hand-built point-cloud mesh for plain (non-splat) scans. "sog"
+   * (PlayCanvas's compressed Gaussian-splat bundle format) renders natively via the engine's own
+   * GSplatComponent - there's no per-point CPU data to build a collision grid from, so sog rooms
+   * get recentering + speed calibration (from the resource's built-in aabb) but no collision.
+   */
+  modelFormat: "ply" | "sog";
   backHref: string;
   /** Rotation around the X axis applied on load, in degrees. See House.tiltDegrees. */
   tiltDegrees?: number;
@@ -97,6 +105,7 @@ const ORIGIN_SPAWN = { x: 0, y: 0, z: 0 };
 
 export function RoomExplorer({
   modelUrl,
+  modelFormat,
   backHref,
   tiltDegrees = 0,
   rollDegrees = 0,
@@ -505,13 +514,202 @@ export function RoomExplorer({
         }
       });
 
-      // The heavy per-point work below (sorting for percentiles, building the collision grid,
-      // building the render mesh) is synchronous and can take a noticeable moment for a
-      // multi-million-point splat - yielding to the browser's render loop between the major steps
-      // (rather than doing it all in one blocking call) lets the "processing" progress below
-      // actually paint instead of jumping straight from download to ready.
+      // The heavy per-point work below (sorting for percentiles, building the collision grid) is
+      // synchronous and can take a noticeable moment for a multi-million-point splat - yielding
+      // to the browser's render loop between the major steps (rather than doing it all in one
+      // blocking call) lets the "processing" progress below actually paint instead of jumping
+      // straight from download to ready. Shared by both the .ply and .sog paths below.
       const yieldToRender = () =>
         new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+      // Both point clouds and gaussian splats (.ply or .sog) size up the scene (and thus the
+      // initial camera move speed) the same way, so switching between them never changes how
+      // movement feels. Scans/captures of either kind can contain stray "floater" points far from
+      // the actual subject - trained gaussian splats in particular often carry thousands of
+      // unpruned low-opacity background splats scattered across the whole training volume.
+      // Standard deviation is NOT robust to this: even a few percent of points spread far away
+      // dominates the variance sum and inflates the estimate by 10x or more. The 5th/95th
+      // percentile per axis ignores those outliers entirely regardless of how far they are.
+      const PERCENTILE_TRIM = 0.05;
+      const percentileRange = (values: ArrayLike<number>) => {
+        const finite = new Float32Array(values.length);
+        let finiteCount = 0;
+        for (let i = 0; i < values.length; i++) {
+          const v = values[i];
+          if (Number.isFinite(v)) finite[finiteCount++] = v;
+        }
+        const sorted = finite.subarray(0, finiteCount).sort();
+        const n = sorted.length;
+        if (n === 0) return { lo: 0, hi: 0 };
+        const lo = sorted[Math.floor((n - 1) * PERCENTILE_TRIM)];
+        const hi = sorted[Math.floor((n - 1) * (1 - PERCENTILE_TRIM))];
+        return { lo, hi };
+      };
+      const computeSceneBounds = (
+        xs: ArrayLike<number>,
+        ys: ArrayLike<number>,
+        zs: ArrayLike<number>,
+      ) => {
+        const rx = percentileRange(xs);
+        const ry = percentileRange(ys);
+        const rz = percentileRange(zs);
+        const centerX = (rx.lo + rx.hi) / 2;
+        const centerY = (ry.lo + ry.hi) / 2;
+        const centerZ = (rz.lo + rz.hi) / 2;
+        // the trimmed window is narrower than the true extent by design, so pad it back out
+        const halfX = ((rx.hi - rx.lo) / 2) * 1.2;
+        const halfY = ((ry.hi - ry.lo) / 2) * 1.2;
+        const halfZ = ((rz.hi - rz.lo) / 2) * 1.2;
+        const radius = Math.sqrt(halfX * halfX + halfY * halfY + halfZ * halfZ);
+        return { centerX, centerY, centerZ, radius };
+      };
+
+      // House.tiltDegrees (X) corrects for scanning/training tools disagreeing on which axis is
+      // "up"; House.rollDegrees (Z) corrects any residual bank left once tilt is right (a scan
+      // that wasn't perfectly level makes walls appear to bank as the camera pans). Both are
+      // baked into one correction so point clouds and gaussian splats are leveled identically,
+      // regardless of file format.
+      const correctionRotation = new pc.Quat().setFromEulerAngles(tiltDegrees, 0, rollDegrees);
+
+      // Wall/floor/ceiling collision grid, built from the same world-space (corrected +
+      // recentered) points the camera moves through - identical for point clouds and gaussian
+      // splats of either format, so bumping into geometry feels the same regardless of which one
+      // loaded.
+      const buildOccupancyGrid = (
+        xs: ArrayLike<number>,
+        ys: ArrayLike<number>,
+        zs: ArrayLike<number>,
+        count: number,
+        centerX: number,
+        centerY: number,
+        centerZ: number,
+      ) => {
+        const grid = new Set<number>();
+        const scratch = new pc.Vec3();
+        for (let i = 0; i < count; i++) {
+          scratch.set(xs[i] - centerX, ys[i] - centerY, zs[i] - centerZ);
+          correctionRotation.transformVector(scratch, scratch);
+          grid.add(voxelKey(scratch.x, scratch.y, scratch.z));
+        }
+        return grid;
+      };
+
+      if (modelFormat === "sog") {
+        // .sog never fires 'load:data' (it's a zip bundle of pre-quantized GPU textures decoded
+        // entirely by shaders) - the engine renders it natively once the asset is attached to a
+        // gsplat component, so there's no custom mesh-building here. But the engine DOES prepare
+        // a CPU-side `centers` array (interleaved x,y,z per splat) by default for every gsplat
+        // format, via a GPU decode-and-readback (Scene#gsplatCentersEnabled, on by default) -
+        // confirmed directly in the engine source: GSplatResourceBase's constructor calls
+        // gsplatData.getCenters(), and for .sog that's backed by a shader that decodes the
+        // means_l/means_u textures and reads the result back to the CPU. That gives .sog the
+        // exact same percentile-bounds + collision-grid treatment as .ply, just sourced from
+        // `resource.centers` instead of PlyParser's per-property arrays.
+        const sogEntity = new pc.Entity("gaussian-splat-sog");
+        sogEntity.addComponent("gsplat", { asset });
+        app.root.addChild(sogEntity);
+
+        const processSogResource = async (resource: pc.GSplatResourceBase) => {
+          const centers = resource.centers;
+          const count =
+            resource.gsplatData?.numSplats ?? (centers ? centers.length / 3 : 0);
+
+          if (centers && count > 0) {
+            setStatus({ phase: "processing", progress: 0.1 });
+            await yieldToRender();
+            if (destroyed) return;
+
+            const xs = new Float32Array(count);
+            const ys = new Float32Array(count);
+            const zs = new Float32Array(count);
+            for (let i = 0; i < count; i++) {
+              xs[i] = centers[i * 3];
+              ys[i] = centers[i * 3 + 1];
+              zs[i] = centers[i * 3 + 2];
+            }
+
+            const { centerX, centerY, centerZ, radius } = computeSceneBounds(xs, ys, zs);
+            setStatus({ phase: "processing", progress: 0.5 });
+            await yieldToRender();
+            if (destroyed) return;
+
+            const rotatedCenter = correctionRotation.transformVector(
+              new pc.Vec3(centerX, centerY, centerZ),
+              new pc.Vec3(),
+            );
+            sogEntity.setRotation(correctionRotation);
+            sogEntity.setPosition(
+              -rotatedCenter.x,
+              -rotatedCenter.y,
+              -rotatedCenter.z,
+            );
+
+            occupancyGrid = buildOccupancyGrid(xs, ys, zs, count, centerX, centerY, centerZ);
+            setStatus({ phase: "processing", progress: 0.9 });
+            await yieldToRender();
+            if (destroyed) return;
+
+            speedTargetRef.current?.set(Math.max(0.6, radius * 0.35));
+            setPointCount(count);
+          } else {
+            // Fallback if centers weren't prepared (e.g. Scene#gsplatCentersEnabled was disabled
+            // app-wide) - recenter from the resource's plain aabb and skip collision, same as
+            // this component's very first .sog implementation.
+            const rotatedCenter = correctionRotation.transformVector(
+              resource.aabb.center,
+              new pc.Vec3(),
+            );
+            sogEntity.setRotation(correctionRotation);
+            sogEntity.setPosition(
+              -rotatedCenter.x,
+              -rotatedCenter.y,
+              -rotatedCenter.z,
+            );
+            speedTargetRef.current?.set(
+              Math.max(0.6, resource.aabb.halfExtents.length() * 0.35),
+            );
+            setPointCount(resource.gsplatData?.numSplats ?? null);
+          }
+
+          handled = true;
+          setStatus({ phase: "ready" });
+        };
+
+        asset.on("load", (readyAsset: pc.Asset) => {
+          if (destroyed || handled) return;
+          const resource = readyAsset.resource as pc.GSplatResourceBase | null;
+          if (!resource) {
+            handled = true;
+            setStatus({
+              phase: "error",
+              message: "Gaussian splat file loaded with no resource",
+            });
+            return;
+          }
+          processSogResource(resource).catch((err) => {
+            handled = true;
+            setStatus({
+              phase: "error",
+              message:
+                err instanceof Error
+                  ? err.message
+                  : "Failed to load the 3D model",
+            });
+          });
+        });
+
+        asset.on("error", (err: string) => {
+          if (destroyed || handled) return;
+          setStatus({
+            phase: "error",
+            message: err || "Failed to load the 3D model",
+          });
+        });
+
+        app.assets.add(asset);
+        app.assets.load(asset);
+        return;
+      }
 
       const processModelData = async (data: pc.GSplatData) => {
         const count = data.numSplats;
@@ -525,74 +723,6 @@ export function RoomExplorer({
         setStatus({ phase: "processing", progress: 0.05 });
         await yieldToRender();
         if (destroyed) return;
-
-        // Both point clouds and gaussian splats size up the scene (and thus the initial camera
-        // move speed) the same way, so switching between the two never changes how movement
-        // feels. Scans/captures of either kind can contain stray "floater" points far from the
-        // actual subject - trained gaussian splats in particular often carry thousands of
-        // unpruned low-opacity background splats scattered across the whole training volume.
-        // Standard deviation is NOT robust to this: even a few percent of points spread far away
-        // dominates the variance sum and inflates the estimate by 10x or more. The 5th/95th
-        // percentile per axis ignores those outliers entirely regardless of how far they are.
-        const PERCENTILE_TRIM = 0.05;
-        const percentileRange = (values: ArrayLike<number>) => {
-          const finite = new Float32Array(values.length);
-          let finiteCount = 0;
-          for (let i = 0; i < values.length; i++) {
-            const v = values[i];
-            if (Number.isFinite(v)) finite[finiteCount++] = v;
-          }
-          const sorted = finite.subarray(0, finiteCount).sort();
-          const n = sorted.length;
-          if (n === 0) return { lo: 0, hi: 0 };
-          const lo = sorted[Math.floor((n - 1) * PERCENTILE_TRIM)];
-          const hi = sorted[Math.floor((n - 1) * (1 - PERCENTILE_TRIM))];
-          return { lo, hi };
-        };
-        const computeSceneBounds = () => {
-          const rx = percentileRange(xs);
-          const ry = percentileRange(ys);
-          const rz = percentileRange(zs);
-          const centerX = (rx.lo + rx.hi) / 2;
-          const centerY = (ry.lo + ry.hi) / 2;
-          const centerZ = (rz.lo + rz.hi) / 2;
-          // the trimmed window is narrower than the true extent by design, so pad it back out
-          const halfX = ((rx.hi - rx.lo) / 2) * 1.2;
-          const halfY = ((ry.hi - ry.lo) / 2) * 1.2;
-          const halfZ = ((rz.hi - rz.lo) / 2) * 1.2;
-          const radius = Math.sqrt(
-            halfX * halfX + halfY * halfY + halfZ * halfZ,
-          );
-          return { centerX, centerY, centerZ, radius };
-        };
-
-        // House.tiltDegrees (X) corrects for scanning/training tools disagreeing on which axis is
-        // "up"; House.rollDegrees (Z) corrects any residual bank left once tilt is right (a scan
-        // that wasn't perfectly level makes walls appear to bank as the camera pans). Both are
-        // baked into one correction so point clouds and gaussian splats are leveled identically.
-        const correctionRotation = new pc.Quat().setFromEulerAngles(
-          tiltDegrees,
-          0,
-          rollDegrees,
-        );
-
-        // Wall/floor/ceiling collision grid, built from the same world-space (corrected +
-        // recentered) points the camera moves through - identical for point clouds and gaussian
-        // splats, so bumping into geometry feels the same regardless of which one loaded.
-        const buildOccupancyGrid = (
-          centerX: number,
-          centerY: number,
-          centerZ: number,
-        ) => {
-          const grid = new Set<number>();
-          const scratch = new pc.Vec3();
-          for (let i = 0; i < count; i++) {
-            scratch.set(xs[i] - centerX, ys[i] - centerY, zs[i] - centerZ);
-            correctionRotation.transformVector(scratch, scratch);
-            grid.add(voxelKey(scratch.x, scratch.y, scratch.z));
-          }
-          return grid;
-        };
 
         // A real trained gaussian splat carries per-splat shape/color (scale, rotation,
         // spherical harmonics) - that needs the engine's native GSplatComponent renderer. A
@@ -608,7 +738,7 @@ export function RoomExplorer({
             centerY: meanY,
             centerZ: meanZ,
             radius,
-          } = computeSceneBounds();
+          } = computeSceneBounds(xs, ys, zs);
           setStatus({ phase: "processing", progress: 0.5 });
           await yieldToRender();
           if (destroyed) return;
@@ -630,7 +760,7 @@ export function RoomExplorer({
           splatEntity.addComponent("gsplat", { asset });
           app.root.addChild(splatEntity);
 
-          occupancyGrid = buildOccupancyGrid(meanX, meanY, meanZ);
+          occupancyGrid = buildOccupancyGrid(xs, ys, zs, count, meanX, meanY, meanZ);
           setStatus({ phase: "processing", progress: 0.9 });
           await yieldToRender();
           if (destroyed) return;
@@ -667,7 +797,7 @@ export function RoomExplorer({
         ensureProp("f_dc_2", 0);
         ensureProp("opacity", -10);
 
-        const { centerX, centerY, centerZ, radius } = computeSceneBounds();
+        const { centerX, centerY, centerZ, radius } = computeSceneBounds(xs, ys, zs);
         setStatus({ phase: "processing", progress: 0.4 });
         await yieldToRender();
         if (destroyed) return;
@@ -793,7 +923,7 @@ export function RoomExplorer({
     // point changed. The initial gotoSpawn() call above always reads their current values; the
     // effect below handles repositioning after that without reloading anything.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modelUrl, retryKey, tiltDegrees, rollDegrees, modelSizeBytes]);
+  }, [modelUrl, modelFormat, retryKey, tiltDegrees, rollDegrees, modelSizeBytes]);
 
   // Runs whenever the active room's spawn point changes, independent of the model-loading effect
   // above - switching rooms within the same house is instant, no re-fetch of the model.

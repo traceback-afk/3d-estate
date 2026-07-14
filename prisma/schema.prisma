@@ -1,0 +1,47 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model House {
+  id             String   @id @default(cuid())
+  name           String
+  address        String
+  description    String
+  /// Full Vercel Blob URL for the .ply/.sog model file.
+  modelUrl       String
+  /// "ply" or "sog" - determines which loading path room-explorer.tsx uses.
+  modelFormat    String
+  modelSizeBytes Int?
+  /// Rotation around the X axis on load, in degrees. See lib/estate-data.ts's old House.tiltDegrees doc.
+  tiltDegrees    Float    @default(0)
+  /// Rotation around the Z axis on load, in degrees. See lib/estate-data.ts's old House.rollDegrees doc.
+  rollDegrees    Float    @default(0)
+  createdAt      DateTime @default(now())
+  rooms          Room[]
+}
+
+model Room {
+  id          String  @id @default(cuid())
+  houseId     String
+  house       House   @relation(fields: [houseId], references: [id], onDelete: Cascade)
+  name        String
+  description String
+  /// Camera spawn position within the house model's local units. Null = model origin.
+  spawnX      Float?
+  spawnY      Float?
+  spawnZ      Float?
+  spawnYaw    Float?
+  spawnPitch  Float?
+
+  @@index([houseId])
+}

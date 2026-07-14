@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { RoomExplorerClient } from "@/components/explore/room-explorer-client";
-import { getHouse, getRoom, modelUrl } from "@/lib/estate-data";
+import { getBaseUrl } from "@/lib/base-url";
+import type { House } from "@/types/estate";
 
 export default async function ExploreHousePage({
   params,
@@ -10,16 +11,20 @@ export default async function ExploreHousePage({
   params: Promise<{ houseId: string; roomId?: string[] }>;
 }) {
   const { houseId, roomId } = await params;
-  const house = getHouse(houseId);
-  if (!house) notFound();
+  const res = await fetch(`${await getBaseUrl()}/api/houses/${houseId}`, { cache: "no-store" });
+  if (res.status === 404) notFound();
+  const house: House = await res.json();
 
+  // Rooms come back embedded in the house response, so the requested room is looked up locally
+  // instead of a second request.
   const requestedRoomId = roomId?.[0];
-  const room = requestedRoomId ? getRoom(houseId, requestedRoomId) : undefined;
+  const room = requestedRoomId ? house.rooms.find((r) => r.id === requestedRoomId) : undefined;
   if (requestedRoomId && !room) notFound();
 
   return (
     <RoomExplorerClient
-      modelUrl={modelUrl(house.modelFile)}
+      modelUrl={house.modelUrl}
+      modelFormat={house.modelFormat}
       backHref={`/houses/${house.id}`}
       tiltDegrees={house.tiltDegrees}
       rollDegrees={house.rollDegrees}

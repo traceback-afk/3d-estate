@@ -3,7 +3,8 @@ import { notFound } from "next/navigation";
 import { ArrowLeft, Box, MapPin, Move3d } from "lucide-react";
 import { SiteHeader } from "@/components/site-header";
 import { buttonVariants } from "@/components/ui/button";
-import { getHouse } from "@/lib/estate-data";
+import { getBaseUrl } from "@/lib/base-url";
+import type { House } from "@/types/estate";
 
 export default async function HousePage({
   params,
@@ -11,20 +12,29 @@ export default async function HousePage({
   params: Promise<{ houseId: string }>;
 }) {
   const { houseId } = await params;
-  const house = getHouse(houseId);
-  if (!house) notFound();
+  const res = await fetch(`${await getBaseUrl()}/api/houses/${houseId}`, { cache: "no-store" });
+  if (res.status === 404) notFound();
+  const house: House = await res.json();
 
   return (
     <div className="flex min-h-full flex-1 flex-col bg-zinc-50 dark:bg-black">
       <SiteHeader />
       <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-10">
-        <Link
-          href="/"
-          className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
-        >
-          <ArrowLeft className="size-4" />
-          All houses
-        </Link>
+        <div className="flex items-center justify-between gap-4">
+          <Link
+            href="/"
+            className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+          >
+            <ArrowLeft className="size-4" />
+            All houses
+          </Link>
+          <Link
+            href={`/admin/houses/${house.id}`}
+            className="text-sm text-muted-foreground hover:text-foreground"
+          >
+            Edit
+          </Link>
+        </div>
 
         <h1 className="mt-4 text-2xl font-semibold tracking-tight">{house.name}</h1>
         <p className="mt-1 flex items-center gap-1 text-muted-foreground">

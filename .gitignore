@@ -37,8 +37,10 @@ yarn-error.log*
 .vercel
 
 # 3D scans/splats - too large for git, served from Vercel Blob instead (see scripts/upload-models.mjs)
-/3dmodels
+/splats
 
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+/lib/generated/prisma
