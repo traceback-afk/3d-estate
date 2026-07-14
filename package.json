@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "upload-models": "node scripts/upload-models.mjs",
-    "db:seed": "tsx prisma/seed.ts"
+    "db:seed": "tsx prisma/seed.ts",
+    "postinstall": "prisma generate"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
