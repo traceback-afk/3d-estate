@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { DoorOpen, MapPin } from "lucide-react";
 import { SiteHeader } from "@/components/site-header";
+import Hero from "@/components/home/hero";
 import { getBaseUrl } from "@/lib/base-url";
 import type { House } from "@/types/estate";
 
@@ -11,7 +12,8 @@ export default async function Home() {
   return (
     <div className="flex min-h-full flex-1 flex-col bg-zinc-50 dark:bg-black">
       <SiteHeader />
-      <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-10">
+      <Hero />
+      <main id="listings" className="mx-auto w-full max-w-5xl flex-1 px-6 py-10">
         <div className="flex items-start justify-between gap-4">
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">Houses</h1>
